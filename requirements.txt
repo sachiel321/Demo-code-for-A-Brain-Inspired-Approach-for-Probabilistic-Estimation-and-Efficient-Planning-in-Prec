@@ -1,0 +1,7 @@
+scipy==1.6.2
+ray==1.4.1
+numpy==1.20.2
+tqdm==4.61.1
+torch==1.7.1
+cupy==9.6.0
+tensorboardX==2.4
