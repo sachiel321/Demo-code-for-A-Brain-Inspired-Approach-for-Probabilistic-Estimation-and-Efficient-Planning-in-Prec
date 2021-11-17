@@ -36,6 +36,8 @@ Configuring hyperparameters in <train_combine_rl.py> firstly, then run the demo:
 python train_combine_rl.py
 ```
 
+4. You can download the dataset by [dataset](https://drive.google.com/drive/folders/1A9bS9T3litoTfIvhUau2hrE59JWOdJbZ?usp=sharing).
+
 
 
 ## Directory Structure Description
