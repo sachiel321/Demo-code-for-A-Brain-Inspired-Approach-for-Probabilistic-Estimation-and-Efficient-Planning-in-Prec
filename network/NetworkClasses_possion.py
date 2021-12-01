@@ -332,6 +332,126 @@ class EPropRSNU(RSNU):
 
 
 ##############cerebellar model##############
+
+def gen_mask(row, col, percent=0.5, num_ones=None):
+    if num_ones is None:
+        # Total number being masked is 0.5 by default.
+        num_ones = int(row * percent)
+    
+    mask = np.zeros([row,col])
+    for i in range(col):
+        temp_mask = np.hstack([
+    	np.zeros(num_ones),
+        np.ones(row - num_ones)])
+        np.random.shuffle(temp_mask)
+        mask[:,i] = temp_mask
+    return mask.reshape(row, col)
+
+class SparseLinearFunction(torch.autograd.Function):
+    """
+    autograd function which masks it's weights by 'mask'.
+    """
+
+    # Note that both forward and backward are @staticmethods
+    @staticmethod
+    # bias, mask is an optional argument
+    def forward(ctx, input, weight, bias=None, mask=None):
+        if mask is not None:
+            # change weight to 0 where mask == 0
+            weight = weight * mask
+
+        output = input.mm(weight.t())
+        if bias is not None:
+            output += bias.unsqueeze(0).expand_as(output)
+
+        ctx.save_for_backward(input, weight, bias, mask)
+        return output
+
+    # This function has only a single output, so it gets only one gradient
+    @staticmethod
+    def backward(ctx, grad_output):
+        input, weight, bias, mask = ctx.saved_tensors
+        grad_input = grad_weight = grad_bias = grad_mask = None
+
+        # These needs_input_grad checks are optional and there only to
+        # improve efficiency. If you want to make your code simpler, you can
+        # skip them. Returning gradients for inputs that don't require it is
+        # not an error.
+        if ctx.needs_input_grad[0]:
+            grad_input = grad_output.mm(weight)
+
+        if ctx.needs_input_grad[1]:
+            grad_weight = grad_output.t().mm(input)
+            if mask is not None:
+                # change grad_weight to 0 where mask == 0
+                grad_weight = grad_weight * mask
+
+        # if bias is not None and ctx.needs_input_grad[2]:
+        if ctx.needs_input_grad[2]:
+            grad_bias = grad_output.sum(0).squeeze(0)
+
+        return grad_input, grad_weight, grad_bias, grad_mask
+
+
+class SparseLinear(nn.Module):
+    def __init__(self, input_features, output_features, bias=True, mask=None):
+        """
+        Argumens
+        ------------------
+        mask [numpy.array]:
+            the shape is (n_input_feature, n_output_feature).
+            the elements are 0 or 1 which declare un-connected or
+            connected.
+        bias [bool]:
+            flg of bias.
+        """
+        super(SparseLinear, self).__init__()
+        self.input_features = input_features
+        self.output_features = output_features
+
+        # nn.Parameter is a special kind of Tensor, that will get
+        # automatically registered as Module's parameter once it's assigned
+        # as an attribute.
+        self.weight = nn.Parameter(torch.Tensor(
+            self.output_features, self.input_features))
+
+        if bias:
+            self.bias = nn.Parameter(
+            	torch.Tensor(self.output_features))
+        else:
+            # You should always register all possible parameters, but the
+            # optional ones can be None if you want.
+            self.register_parameter('bias', None)
+
+        # Initialize the above parameters (weight & bias).
+        self.init_params()
+
+        if mask is not None:
+            mask = torch.tensor(mask, dtype=torch.float).t()
+            self.mask = nn.Parameter(mask, requires_grad=False)
+            # print('\n[!] CustomizedLinear: \n', self.weight.data.t())
+        else:
+            self.register_parameter('mask', None)
+
+    def init_params(self):
+        stdv = 1. / math.sqrt(self.weight.size(1))
+        self.weight.data.uniform_(-stdv, stdv)
+        if self.bias is not None:
+            self.bias.data.uniform_(-stdv, stdv)
+
+    def forward(self, input):
+        # See the autograd section for explanation of what happens here.
+        return SparseLinearFunction.apply(
+        	input, self.weight, self.bias, self.mask)
+
+    def extra_repr(self):
+        # (Optional)Set the extra information about this module. You can test
+        # it by printing an object of this class.
+        return 'input_features={}, output_features={}, bias={}, mask={}'.format(
+            self.input_features, self.output_features,
+            self.bias is not None, self.mask is not None)
+
+
 class cere_SNN(nn.Module):
     def __init__(self,batch_size,num_in_MF,num_out_MF,num_out_GC,num_out_PC,num_out_DCN,possion_num=50):
         super(cere_SNN, self).__init__()
@@ -342,15 +462,17 @@ class cere_SNN(nn.Module):
         self.num_out_PC = num_out_PC*4
         self.num_out_DCN = num_out_DCN*8
         self.possion_num = possion_num
+        MF_GC_mask = gen_mask(self.num_out_MF, self.num_out_GC,num_ones=4)
         self.fc1 = nn.Linear(self.num_in_MF, self.num_out_MF, bias = if_bias)
-        self.fc2 = nn.Linear(self.num_out_MF, self.num_out_GC, bias = if_bias)
+        self.fc2 = SparseLinear(self.num_out_MF, self.num_out_GC, bias = if_bias,mask=MF_GC_mask)
         self.fc3 = nn.Linear(self.num_out_GC, self.num_out_PC, bias = if_bias)
         self.fc4 = nn.Linear(self.num_out_PC, self.num_out_DCN, bias = if_bias)
+
         print("number of parameters: %e", sum(p.numel() for p in self.parameters()))
 
     def forward(self,m,u,sigma,f, time_window):
         self.fc1 = self.fc1.float()
-
+        # self.fc3.weight.data = torch.clamp(self.fc3.weight, -100, 0)
         h1_mem = h1_spike = h1_sumspike = torch.zeros(self.batch_size, self.num_out_MF).cuda()
         h2_mem = h2_spike = h2_sumspike = torch.zeros(self.batch_size, self.num_out_GC).cuda()
         h3_mem = h3_spike = h3_sumspike = torch.zeros(self.batch_size, self.num_out_PC).cuda()
@@ -372,7 +494,7 @@ class cere_SNN(nn.Module):
 
             #DCN:
             baseline_MF = torch.mean(h1_spike)
-            m_DCN_in = h3_spike + baseline_MF + 0.3
+            m_DCN_in = -h3_spike + torch.abs(baseline_MF)
 
             h4_mem, h4_spike = mem_update(self.fc4, m_DCN_in, h4_mem, h4_spike)
             #h1_sumspike += h1_spike
@@ -437,11 +559,11 @@ class cere_model(nn.Module):
 
     def forward(self,m,u,sigma,f, time_window):
         batch_size = m.shape[0]    
-        self.monitor_DCN_m = torch.zeros(batch_size, self.num_out_DCN*8, self.possion_num).to(self.device)
-        m_MF_mem = m_MF_spike = u_MF_mem = u_MF_spike = sigma_MF_mem = sigma_MF_spike = f_MF_mem = f_MF_spike = torch.zeros(batch_size, self.num_out_MF).to(self.device)
-        m_GC_mem = m_GC_spike = u_GC_mem = u_GC_spike = sigma_GC_mem = sigma_GC_spike = f_GC_mem = f_GC_spike = torch.zeros(batch_size, self.num_out_GC).to(self.device)
-        m_PCE_mem = m_PCE_spike = u_PCE_mem = u_PCE_spike = m_PCI_mem = m_PCI_spike = u_PCI_mem = u_PCI_spike =  torch.zeros(batch_size, self.num_out_PC).to(self.device)
-        m_DCN_mem = m_DCN_spike = torch.zeros(batch_size, self.num_out_DCN*8).to(self.device)
+        self.monitor_DCN_m = torch.zeros(batch_size, self.num_out_DCN*8, self.possion_num).cuda()
+        m_MF_mem = m_MF_spike = u_MF_mem = u_MF_spike = sigma_MF_mem = sigma_MF_spike = f_MF_mem = f_MF_spike = torch.zeros(batch_size, self.num_out_MF).cuda()
+        m_GC_mem = m_GC_spike = u_GC_mem = u_GC_spike = sigma_GC_mem = sigma_GC_spike = f_GC_mem = f_GC_spike = torch.zeros(batch_size, self.num_out_GC).cuda()
+        m_PCE_mem = m_PCE_spike = u_PCE_mem = u_PCE_spike = m_PCI_mem = m_PCI_spike = u_PCI_mem = u_PCI_spike =  torch.zeros(batch_size, self.num_out_PC).cuda()
+        m_DCN_mem = m_DCN_spike = torch.zeros(batch_size, self.num_out_DCN*8).cuda()
         
         m = m.float()
         u = u.float()
