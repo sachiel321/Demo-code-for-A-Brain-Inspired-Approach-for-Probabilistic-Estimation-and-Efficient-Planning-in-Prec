@@ -50,7 +50,6 @@ r_a = 10 #radius of annulus
 height_a = 50 #height of annulus
 bias_za = 0 #the initial height of annulus
 
-# TODO:添加reward, done, info
 class simulate:
     def __init__(self, x_a, y_a, z_a, x_b, y_b, z_b,
                 ra=r_c,rb=r_a,M=80,ha=height_c,hb=height_a):        
@@ -89,13 +88,12 @@ class simulate:
         self.f_x = f * cos_theta
         self.f_y = f * sin_theta
 
-        if self.pa.getz() < -5 or self.pa.getz() > self.pb.getz()+10: #dangerous detection
-            self.isbottom = -1 - (abs(self.f_x)+abs(self.f_y))*0.002
+        if abs(self.pa.getz() - (self.pb.getz()))>=10: #dangerous detection
+            self.isbottom = -1 - np.sqrt(self.f_x*self.f_x+self.f_y*self.f_y)*0.002
 
-        elif self.pa.getz() >= self.pb.getz() and self.pa.getz() <= self.pb.getz()+10: #bottom detection
-            self.isbottom = 1 - (abs(self.f_x)+abs(self.f_y))*0.002
-        else:
-            self.isbottom = - (abs(self.f_x)+abs(self.f_y))*0.002
+        elif abs(self.pa.getz() - (self.pb.getz()))<10: #bottom detection
+            self.isbottom = 1 - np.sqrt(self.f_x*self.f_x+self.f_y*self.f_y)*0.002
+
 
         return np.array([self.f_x, self.f_y, self.pa.getz(),delt_x,delt_y,delt_z]).astype(np.float32), self.isbottom, False, self.info
     
