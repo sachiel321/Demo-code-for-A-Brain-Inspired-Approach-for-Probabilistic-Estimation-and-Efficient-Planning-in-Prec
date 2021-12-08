@@ -64,6 +64,7 @@ def train_hippo(args=args):
 
     dims = (7,7,7)
     bias = 4
+    encoding_num = 40
     n_in = dims[0]*dims[1]*dims[2]
     w_mat = 4*20*np.array([[3, 6],[-2, -2]])
     steps = 50
@@ -81,7 +82,7 @@ def train_hippo(args=args):
     device = 'cuda:'+gpu
     if load_model == False:
         reservoir_network = EPropRSNU(ch*bias,n_in)
-        snu = SNN(batch_size=args.batch_size,input_size=n_in,num_classes=bias, encoding_num=bias,possion_num=possion_num,gpu=gpu)
+        snu = SNN(batch_size=args.batch_size,input_size=n_in,num_classes=bias, encoding_num=encoding_num,possion_num=possion_num,gpu=gpu)
         reservoir_network = reservoir_network.to(device)
         snu = snu.to(device)
 
